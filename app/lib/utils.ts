@@ -68,3 +68,12 @@ export function formatDuration(
   }
   return `${mStr}m`;
 }
+
+/** A calendar day, e.g. "Sat, Nov 14". */
+export function formatDay(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+}

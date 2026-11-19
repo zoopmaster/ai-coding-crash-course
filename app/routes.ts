@@ -18,7 +18,11 @@ export default [
       "courses/:slug/lessons/:lessonId",
       "routes/courses.$slug.lessons.$lessonId.tsx"
     ),
-    route("instructor", "routes/instructor.tsx"),
+    // The student panel slides in over the dashboard, so it renders in the
+    // dashboard's <Outlet/>.
+    route("instructor", "routes/instructor.tsx", [
+      route("students/:userId", "routes/instructor.students.$userId.tsx"),
+    ]),
     route("instructor/new", "routes/instructor.new.tsx"),
     route("instructor/questions", "routes/instructor.questions.tsx"),
     route("instructor/:courseId", "routes/instructor.$courseId.tsx"),

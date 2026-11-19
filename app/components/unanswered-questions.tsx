@@ -1,5 +1,6 @@
 import { Link } from "react-router";
 import { Card } from "~/components/ui/card";
+import { StudentLink } from "~/components/student-link";
 import { UserAvatar } from "~/components/user-avatar";
 import { cn } from "~/lib/utils";
 import type { UnansweredQuestion } from "~/services/instructorDashboardService";
@@ -28,10 +29,8 @@ export function UnansweredQuestions({
           <ul className="divide-y divide-border">
             {questions.map((q) => (
               <li key={q.id}>
-                <Link
-                  to={`/courses/${q.course.slug}/lessons/${q.lesson.id}`}
-                  className="flex items-start gap-3 px-4 py-3 hover:bg-muted/50"
-                >
+                {/* The row links to the thread; the name, above it, opens the panel. */}
+                <div className="relative flex items-start gap-3 px-4 py-3 hover:bg-muted/50">
                   <UserAvatar
                     name={q.student.name}
                     avatarUrl={q.student.avatarUrl}
@@ -39,15 +38,21 @@ export function UnansweredQuestions({
                   />
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm">
-                      <span className="font-medium">{q.student.name}</span>
+                      <StudentLink
+                        student={q.student}
+                        className="relative z-10"
+                      />
                       <span className="text-muted-foreground">
                         {" "}
                         · {q.course.title} / {q.lesson.title}
                       </span>
                     </p>
-                    <p className="truncate text-sm text-muted-foreground">
+                    <Link
+                      to={`/courses/${q.course.slug}/lessons/${q.lesson.id}`}
+                      className="block truncate text-sm text-muted-foreground after:absolute after:inset-0"
+                    >
                       {q.excerpt}
-                    </p>
+                    </Link>
                   </div>
                   <span
                     className={cn(
@@ -59,7 +64,7 @@ export function UnansweredQuestions({
                   >
                     {q.waitingDays === 0 ? "Today" : `${q.waitingDays}d`}
                   </span>
-                </Link>
+                </div>
               </li>
             ))}
           </ul>

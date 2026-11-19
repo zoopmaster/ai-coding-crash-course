@@ -1,4 +1,4 @@
-import { Link } from "react-router";
+import { Link, Outlet } from "react-router";
 import type { Route } from "./+types/instructor";
 import { getCoursesByInstructor, getLessonCountForCourse } from "~/services/courseService";
 import { getEnrollmentCountForCourse } from "~/services/enrollmentService";
@@ -131,6 +131,9 @@ export default function InstructorDashboard({
       <CourseCards cards={dashboard.courseCards} />
       <UnansweredQuestions questions={dashboard.unansweredQuestions} />
       <RecentDiscussion entries={dashboard.recentDiscussion} />
+
+      {/* The student panel, when /instructor/students/:userId is open. */}
+      <Outlet />
 
       <div className="mb-8 flex items-center justify-between">
         <div>

@@ -13,7 +13,10 @@ vi.mock("~/db", () => ({
 }));
 
 // Import after mock so the module picks up our test db
-import { getInstructorDashboard } from "./instructorDashboardService";
+import {
+  getInstructorDashboard,
+  getStudentOverview,
+} from "./instructorDashboardService";
 
 // November 2026: Sun 15, Mon 16, Tue 17, Wed 18, Thu 19, Fri 20, Sat 21.
 // Local-time constructors keep the Sunday rule independent of the machine's
@@ -721,6 +724,7 @@ describe("instructorDashboardService", () => {
           excerpt: "Help?",
           createdAt: iso(15),
           replyCount: 2,
+          authorIsEnrolled: false,
         },
       ]);
     });
@@ -747,6 +751,22 @@ describe("instructorDashboardService", () => {
       expect(dashboard.recentDiscussion.map((e) => e.id)).toEqual([shown.id]);
     });
 
+    it("says which authors are enrolled, so only students' names open the panel", () => {
+      const [lesson] = createLessons(base.course.id, 1);
+      enroll(base.user.id, base.course.id);
+      const student = answered(base.user.id, lesson.id, 16);
+      const staff = answered(base.instructor.id, lesson.id, 15);
+
+      const dashboard = getInstructorDashboard(asAdmin(), NOW);
+
+      expect(
+        dashboard.recentDiscussion.map((e) => [e.id, e.authorIsEnrolled])
+      ).toEqual([
+        [student.id, true],
+        [staff.id, false],
+      ]);
+    });
+
     it("leaves out an admin's own comments too", () => {
       const [lesson] = createLessons(base.course.id, 1);
       const admin = asAdmin();
@@ -756,6 +776,214 @@ describe("instructorDashboardService", () => {
       const dashboard = getInstructorDashboard(admin, NOW);
 
       expect(dashboard.recentDiscussion.map((e) => e.id)).toEqual([theirs.id]);
+    });
+  });
+
+  describe("student overview", () => {
+    const sectionCourses = (studentId: number, viewer = asInstructor()) =>
+      getStudentOverview(viewer, studentId, NOW)?.sections.map(
+        (s) => s.course.title
+      );
+
+    it("has one section per course the student shares with the viewer", () => {
+      const other = createUser("Other", schema.UserRole.Instructor);
+      const second = createCourse("Second Course", base.instructor.id);
+      const theirs = createCourse("Their Course", other.id);
+      enroll(base.user.id, base.course.id);
+      enroll(base.user.id, second.id);
+      enroll(base.user.id, theirs.id);
+
+      const overview = getStudentOverview(asInstructor(), base.user.id, NOW);
+
+      expect(overview?.student).toEqual({
+        id: base.user.id,
+        name: "Test User",
+        avatarUrl: null,
+      });
+      expect(sectionCourses(base.user.id)?.sort()).toEqual([
+        "Second Course",
+        "Test Course",
+      ]);
+    });
+
+    it("returns nothing for a student outside the viewer's courses", () => {
+      const other = createUser("Other", schema.UserRole.Instructor);
+      const theirs = createCourse("Their Course", other.id);
+      enroll(base.user.id, theirs.id);
+
+      expect(getStudentOverview(asInstructor(), base.user.id, NOW)).toBeNull();
+    });
+
+    it("returns nothing for a student with no enrollments or no such user", () => {
+      expect(getStudentOverview(asInstructor(), base.user.id, NOW)).toBeNull();
+      expect(getStudentOverview(asInstructor(), 9999, NOW)).toBeNull();
+    });
+
+    const sectionFor = (studentId: number, courseId: number) =>
+      getStudentOverview(asInstructor(), studentId, NOW)?.sections.find(
+        (s) => s.course.id === courseId
+      );
+
+    it("shows progress and the first lesson not yet completed", () => {
+      const [first, second, third, fourth] = createLessons(base.course.id, 4);
+      enroll(base.user.id, base.course.id);
+      completeLesson(base.user.id, first.id);
+      completeLesson(base.user.id, third.id);
+      viewLesson(base.user.id, fourth.id, 18);
+
+      const section = sectionFor(base.user.id, base.course.id);
+
+      expect(section?.progress).toEqual({ completed: 2, total: 4 });
+      expect(section?.currentLesson).toEqual({
+        id: second.id,
+        title: "Lesson 2",
+      });
+    });
+
+    it("has no current lesson once the student has finished", () => {
+      const lessons = createLessons(base.course.id, 2);
+      enroll(base.user.id, base.course.id);
+      for (const lesson of lessons) completeLesson(base.user.id, lesson.id);
+
+      const section = sectionFor(base.user.id, base.course.id);
+
+      expect(section?.progress).toEqual({ completed: 2, total: 2 });
+      expect(section?.currentLesson).toBeNull();
+    });
+
+    it("shows the same flags as the dashboard, and when they were last active", () => {
+      const [lesson] = createLessons(base.course.id, 2);
+      const quiz = createQuiz(lesson.id, "Joins Quiz");
+      enroll(base.user.id, base.course.id, 10);
+      attemptQuiz(base.user.id, quiz.id, false, 14);
+      attemptQuiz(base.user.id, quiz.id, false, 14);
+
+      const section = sectionFor(base.user.id, base.course.id);
+
+      // Last active Sat 14; Mon 16, Tue 17, Wed 18, Thu 19 → 4 days.
+      expect(section?.flags).toEqual([
+        {
+          kind: "quizRetry",
+          quizId: quiz.id,
+          quizTitle: "Joins Quiz",
+          failedAttempts: 2,
+        },
+        { kind: "quiet", days: 4, lastActiveAt: iso(14) },
+      ]);
+      expect(section?.lastActiveAt).toBe(iso(14));
+    });
+
+    it("has no flags for a student who is fine, and no last-active date before they start", () => {
+      createLessons(base.course.id, 2);
+      enroll(base.user.id, base.course.id, 18);
+
+      const section = sectionFor(base.user.id, base.course.id);
+
+      expect(section?.flags).toEqual([]);
+      expect(section?.lastActiveAt).toBeNull();
+    });
+
+    it("never flags a course the student has finished", () => {
+      const [lesson] = createLessons(base.course.id, 1);
+      enroll(base.user.id, base.course.id, 2);
+      completeLesson(base.user.id, lesson.id, 3);
+
+      expect(sectionFor(base.user.id, base.course.id)?.flags).toEqual([]);
+    });
+
+    it("lists quizzes the student hasn't passed, with attempt counts", () => {
+      const [first, second, third] = createLessons(base.course.id, 3);
+      const once = createQuiz(first.id, "Once Quiz");
+      const passed = createQuiz(second.id, "Passed Quiz");
+      createQuiz(third.id, "Untried Quiz");
+      const twice = createQuiz(third.id, "Twice Quiz");
+      enroll(base.user.id, base.course.id);
+      attemptQuiz(base.user.id, once.id, false);
+      attemptQuiz(base.user.id, passed.id, false);
+      attemptQuiz(base.user.id, passed.id, true);
+      attemptQuiz(base.user.id, twice.id, false);
+      attemptQuiz(base.user.id, twice.id, false);
+      const classmate = createUser("Classmate");
+      enroll(classmate.id, base.course.id);
+      attemptQuiz(classmate.id, once.id, false);
+
+      const section = sectionFor(base.user.id, base.course.id);
+
+      expect(section?.unpassedQuizzes).toEqual([
+        { id: once.id, title: "Once Quiz", attempts: 1 },
+        { id: twice.id, title: "Twice Quiz", attempts: 2 },
+      ]);
+    });
+
+    it("lists the student's questions, unanswered first, each with its lesson", () => {
+      const [first, second] = createLessons(base.course.id, 2);
+      enroll(base.user.id, base.course.id);
+      const answeredOld = postComment(base.user.id, first.id, 10);
+      postComment(base.instructor.id, first.id, 11, answeredOld.id);
+      const answeredNew = postComment(base.user.id, second.id, 16);
+      postComment(base.instructor.id, second.id, 17, answeredNew.id);
+      const waitingNew = postComment(base.user.id, second.id, 18);
+      const waitingOld = postComment(base.user.id, first.id, 12);
+      postComment(base.user.id, first.id, 18, answeredOld.id); // a reply
+      const deleted = postComment(base.user.id, first.id, 18);
+      testDb
+        .update(schema.comments)
+        .set({ deletedAt: iso(18) })
+        .where(eq(schema.comments.id, deleted.id))
+        .run();
+      const classmate = createUser("Classmate");
+      postComment(classmate.id, first.id, 18);
+
+      const questions = sectionFor(base.user.id, base.course.id)?.questions;
+
+      expect(questions?.map((q) => [q.id, q.answered])).toEqual([
+        [waitingOld.id, false],
+        [waitingNew.id, false],
+        [answeredNew.id, true],
+        [answeredOld.id, true],
+      ]);
+      expect(questions?.[0]).toEqual({
+        id: waitingOld.id,
+        lesson: { id: first.id, title: "Lesson 1" },
+        excerpt: "Help?",
+        createdAt: iso(12),
+        answered: false,
+      });
+    });
+
+    it("puts flagged courses first, most flags first, then by title", () => {
+      const course = (title: string) => {
+        const c = createCourse(title, base.instructor.id);
+        createLessons(c.id, 2);
+        return c;
+      };
+      const zulu = course("Zulu");
+      const alpha = course("Alpha");
+      const quiet = course("Quiet");
+      const both = course("Both");
+      enroll(base.user.id, zulu.id);
+      enroll(base.user.id, alpha.id);
+      enroll(base.user.id, quiet.id, 10);
+      enroll(base.user.id, both.id, 10);
+      const [bothLesson] = createLessons(both.id, 1);
+      const quiz = createQuiz(bothLesson.id, "Quiz");
+      attemptQuiz(base.user.id, quiz.id, false, 12);
+      attemptQuiz(base.user.id, quiz.id, false, 12);
+
+      expect(sectionCourses(base.user.id)).toEqual([
+        "Both",
+        "Quiet",
+        "Alpha",
+        "Zulu",
+      ]);
+    });
+
+    it("lets an admin open any student", () => {
+      const other = createUser("Other", schema.UserRole.Instructor);
+      const theirs = createCourse("Their Course", other.id);
+      enroll(base.user.id, theirs.id);
+
+      expect(sectionCourses(base.user.id, asAdmin())).toEqual(["Their Course"]);
     });
   });
 });
