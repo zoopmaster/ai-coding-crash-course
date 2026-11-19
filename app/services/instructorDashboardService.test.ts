@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
+import { eq } from "drizzle-orm";
 
 let testDb: ReturnType<typeof createTestDb>;
 let base: ReturnType<typeof seedBaseData>;
@@ -140,7 +141,11 @@ function watchVideo(userId: number, lessonId: number, day: number) {
     .run();
 }
 
-const asInstructor = () => base.instructor.id;
+const asInstructor = () => ({ userId: base.instructor.id, isAdmin: false });
+const asAdmin = () => ({
+  userId: createUser("Ada", schema.UserRole.Admin).id,
+  isAdmin: true,
+});
 
 function flagsFor(
   dashboard: ReturnType<typeof getInstructorDashboard>,
@@ -398,7 +403,7 @@ describe("instructorDashboardService", () => {
     it("shows an admin every course", () => {
       const course = quietStudentInOtherInstructorsCourse();
 
-      const dashboard = getInstructorDashboard(null, NOW);
+      const dashboard = getInstructorDashboard(asAdmin(), NOW);
 
       expect(flagsFor(dashboard, base.user.id, course.id)).toHaveLength(1);
     });
@@ -439,6 +444,318 @@ describe("instructorDashboardService", () => {
         "Quinn",
         "Rae",
       ]);
+    });
+  });
+
+  describe("course cards", () => {
+    it("counts enrolled, stuck, unanswered and finished students", () => {
+      const lessons = createLessons(base.course.id, 2);
+      const finisher = createUser("Fin");
+      const quiet = createUser("Quinn");
+      const asker = createUser("Ash");
+
+      enroll(finisher.id, base.course.id, 1);
+      for (const lesson of lessons) completeLesson(finisher.id, lesson.id, 18);
+      enroll(quiet.id, base.course.id, 9);
+      enroll(asker.id, base.course.id, 18);
+      postComment(asker.id, lessons[0].id, 18); // unanswered, not yet stale
+      postComment(asker.id, lessons[1].id, 18);
+
+      const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+      expect(dashboard.courseCards).toEqual([
+        {
+          course: { id: base.course.id, title: "Test Course", slug: "test-course" },
+          enrolledCount: 3,
+          stuckCount: 1,
+          unansweredCount: 2,
+          finishedCount: 1,
+          dropOffLesson: null,
+        },
+      ]);
+    });
+
+    it("counts a student with several flags as one stuck student", () => {
+      const lessons = createLessons(base.course.id, 2);
+      const quiz = createQuiz(lessons[0].id, "Joins Quiz");
+      enroll(base.user.id, base.course.id, 1);
+      attemptQuiz(base.user.id, quiz.id, false, 2);
+      attemptQuiz(base.user.id, quiz.id, false, 2);
+
+      const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+      expect(dashboard.courseCards[0].stuckCount).toBe(1);
+    });
+
+    it("includes unpublished courses with students and skips empty ones", () => {
+      const draft = createCourse("Draft Course", base.instructor.id);
+      testDb
+        .update(schema.courses)
+        .set({ status: schema.CourseStatus.Draft })
+        .where(eq(schema.courses.id, draft.id))
+        .run();
+      createLessons(draft.id, 1);
+      enroll(base.user.id, draft.id, 18);
+      createCourse("Empty Course", base.instructor.id);
+
+      const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+      expect(dashboard.courseCards.map((card) => card.course.title)).toEqual([
+        "Draft Course",
+      ]);
+    });
+  
+    it("sorts by stuck, then unanswered, then title", () => {
+      const course = (title: string) => {
+        const c = createCourse(title, base.instructor.id);
+        return { id: c.id, lesson: createLessons(c.id, 1)[0] };
+      };
+      let n = 0;
+      const active = (courseId: number) => {
+        const student = createUser(`Active ${n++}`);
+        enroll(student.id, courseId, 18);
+        return student;
+      };
+      const quiet = (courseId: number) =>
+        enroll(createUser(`Quiet ${n++}`).id, courseId, 9);
+
+      // base.course ("Test Course"): one student, nothing wrong.
+      createLessons(base.course.id, 1);
+      active(base.course.id);
+
+      const oneStuck = course("Zeta");
+      quiet(oneStuck.id);
+
+      const twoStuck = course("Omega");
+      quiet(twoStuck.id);
+      quiet(twoStuck.id);
+
+      const stuckAndAsked = course("Yankee");
+      quiet(stuckAndAsked.id);
+      postComment(active(stuckAndAsked.id).id, stuckAndAsked.lesson.id, 18);
+
+      const alsoClean = course("Alpha");
+      active(alsoClean.id);
+
+      const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+      expect(dashboard.courseCards.map((card) => card.course.title)).toEqual([
+        "Omega",
+        "Yankee",
+        "Zeta",
+        "Alpha",
+        "Test Course",
+      ]);
+    });
+
+    describe("drop-off lesson", () => {
+      // Module 2 is inserted first, so ids disagree with course order.
+      function lessonsOutOfInsertOrder() {
+        const later = testDb
+          .insert(schema.modules)
+          .values({ courseId: base.course.id, title: "Later", position: 2 })
+          .returning()
+          .get();
+        const first = testDb
+          .insert(schema.modules)
+          .values({ courseId: base.course.id, title: "First", position: 1 })
+          .returning()
+          .get();
+        const lesson = (moduleId: number, title: string, position: number) =>
+          testDb
+            .insert(schema.lessons)
+            .values({ moduleId, title, position })
+            .returning()
+            .get();
+        const c = lesson(later.id, "C", 1);
+        const b = lesson(first.id, "B", 2);
+        const a = lesson(first.id, "A", 1);
+        return [a, b, c];
+      }
+
+      function studentsAt(count: number, completed: { id: number }[]) {
+        for (let i = 0; i < count; i++) {
+          const student = createUser(`Student ${completed.length}-${i}`);
+          enroll(student.id, base.course.id, 18);
+          for (const lesson of completed) completeLesson(student.id, lesson.id, 18);
+        }
+      }
+
+      it("shows the first incomplete lesson, in course order, shared by 3 students", () => {
+        const [a, b, c] = lessonsOutOfInsertOrder();
+        studentsAt(3, [a, b]); // stalled at C
+        studentsAt(2, [a]); // stalled at B
+        studentsAt(4, [a, b, c]); // finished, ignored
+
+        const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+        expect(dashboard.courseCards[0].dropOffLesson).toEqual({
+          id: c.id,
+          title: "C",
+          studentCount: 3,
+        });
+      });
+
+      it("hides the drop-off lesson when fewer than 3 students share it", () => {
+        const [a] = lessonsOutOfInsertOrder();
+        studentsAt(2, []); // stalled at A
+        studentsAt(2, [a]); // stalled at B
+
+        const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+        expect(dashboard.courseCards[0].dropOffLesson).toBeNull();
+      });
+
+      it("skips past a completed lesson to the first gap", () => {
+        const [a, b, c] = lessonsOutOfInsertOrder();
+        studentsAt(3, [a, c]); // stalled at B
+
+        const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+        expect(dashboard.courseCards[0].dropOffLesson).toEqual({
+          id: b.id,
+          title: "B",
+          studentCount: 3,
+        });
+      });
+    });
+  });
+
+  describe("unanswered questions", () => {
+    it("lists the 10 oldest, oldest first, with how long each has waited", () => {
+      const [lesson] = createLessons(base.course.id, 1);
+      enroll(base.user.id, base.course.id, 1);
+      const days = [17, 2, 16, 3, 4, 5, 6, 7, 9, 10, 11, 12];
+      for (const day of days) postComment(base.user.id, lesson.id, day);
+
+      const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+      expect(
+        dashboard.unansweredQuestions.map((q) => q.createdAt)
+      ).toEqual([2, 3, 4, 5, 6, 7, 9, 10, 11, 12].map((d) => iso(d)));
+    });
+
+    it("describes each question and marks it stale at the shared threshold", () => {
+      const [lesson] = createLessons(base.course.id, 1);
+      enroll(base.user.id, base.course.id, 1);
+      const stale = postComment(base.user.id, lesson.id, 16);
+      postComment(base.user.id, lesson.id, 17);
+
+      const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+      expect(dashboard.unansweredQuestions).toEqual([
+        {
+          id: stale.id,
+          student: { id: base.user.id, name: "Test User", avatarUrl: null },
+          course: { id: base.course.id, title: "Test Course", slug: "test-course" },
+          lesson: { id: lesson.id, title: "Lesson 1" },
+          excerpt: "Help?",
+          createdAt: iso(16),
+          waitingDays: 3,
+          isStale: true,
+        },
+        expect.objectContaining({ waitingDays: 2, isStale: false }),
+      ]);
+    });
+
+    it("uses only the first line of a question", () => {
+      const [lesson] = createLessons(base.course.id, 1);
+      enroll(base.user.id, base.course.id, 1);
+      testDb
+        .insert(schema.comments)
+        .values({
+          userId: base.user.id,
+          lessonId: lesson.id,
+          body: "Why does the join fail?\n\nHere is my code...",
+          createdAt: iso(18),
+        })
+        .run();
+
+      const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+      expect(dashboard.unansweredQuestions[0].excerpt).toBe(
+        "Why does the join fail?"
+      );
+    });
+  });
+
+  describe("recent discussion", () => {
+    function answered(authorId: number, lessonId: number, day: number) {
+      const thread = postComment(authorId, lessonId, day);
+      postComment(base.instructor.id, lessonId, day, thread.id);
+      return thread;
+    }
+
+    it("lists the 10 newest answered threads, newest first", () => {
+      const [lesson] = createLessons(base.course.id, 1);
+      const days = [2, 18, 3, 17, 4, 16, 5, 15, 6, 14, 7, 13];
+      for (const day of days) answered(base.user.id, lesson.id, day);
+
+      const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+      expect(dashboard.recentDiscussion.map((e) => e.createdAt)).toEqual(
+        [18, 17, 16, 15, 14, 13, 7, 6, 5, 4].map((d) => iso(d))
+      );
+    });
+
+    it("describes each thread with its live reply count", () => {
+      const [lesson] = createLessons(base.course.id, 1);
+      const classmate = createUser("Cam");
+      const thread = answered(base.user.id, lesson.id, 15);
+      postComment(classmate.id, lesson.id, 16, thread.id);
+      const deletedReply = postComment(classmate.id, lesson.id, 16, thread.id);
+      testDb
+        .update(schema.comments)
+        .set({ deletedAt: iso(17) })
+        .where(eq(schema.comments.id, deletedReply.id))
+        .run();
+
+      const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+      expect(dashboard.recentDiscussion).toEqual([
+        {
+          id: thread.id,
+          author: { id: base.user.id, name: "Test User", avatarUrl: null },
+          course: { id: base.course.id, title: "Test Course", slug: "test-course" },
+          lesson: { id: lesson.id, title: "Lesson 1" },
+          excerpt: "Help?",
+          createdAt: iso(15),
+          replyCount: 2,
+        },
+      ]);
+    });
+
+    it("leaves out unanswered questions, the viewer's own comments, deleted threads and other courses", () => {
+      const [lesson] = createLessons(base.course.id, 1);
+      const shown = answered(base.user.id, lesson.id, 10);
+      postComment(base.user.id, lesson.id, 18); // unanswered
+      postComment(base.instructor.id, lesson.id, 18); // the viewer's own
+      const deleted = answered(base.user.id, lesson.id, 18);
+      testDb
+        .update(schema.comments)
+        .set({ deletedAt: iso(18) })
+        .where(eq(schema.comments.id, deleted.id))
+        .run();
+      const other = createUser("Other", schema.UserRole.Instructor);
+      const theirCourse = createCourse("Their Course", other.id);
+      const [theirLesson] = createLessons(theirCourse.id, 1);
+      const theirs = postComment(base.user.id, theirLesson.id, 18);
+      postComment(other.id, theirLesson.id, 18, theirs.id);
+
+      const dashboard = getInstructorDashboard(asInstructor(), NOW);
+
+      expect(dashboard.recentDiscussion.map((e) => e.id)).toEqual([shown.id]);
+    });
+
+    it("leaves out an admin's own comments too", () => {
+      const [lesson] = createLessons(base.course.id, 1);
+      const admin = asAdmin();
+      postComment(admin.userId, lesson.id, 18);
+      const theirs = answered(base.instructor.id, lesson.id, 17);
+
+      const dashboard = getInstructorDashboard(admin, NOW);
+
+      expect(dashboard.recentDiscussion.map((e) => e.id)).toEqual([theirs.id]);
     });
   });
 });

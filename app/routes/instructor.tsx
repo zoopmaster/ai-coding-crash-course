@@ -5,6 +5,9 @@ import { getEnrollmentCountForCourse } from "~/services/enrollmentService";
 import { requireInstructorOrAdmin } from "~/lib/access.server";
 import { getInstructorDashboard } from "~/services/instructorDashboardService";
 import { NeedsAttention } from "~/components/needs-attention";
+import { CourseCards } from "~/components/course-cards";
+import { UnansweredQuestions } from "~/components/unanswered-questions";
+import { RecentDiscussion } from "~/components/recent-discussion";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -24,7 +27,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const { userId, isAdmin } = await requireInstructorOrAdmin(request);
 
   // Admins see every course here; instructors only their own.
-  const dashboard = getInstructorDashboard(isAdmin ? null : userId, new Date());
+  const dashboard = getInstructorDashboard({ userId, isAdmin }, new Date());
 
   const instructorCourses = getCoursesByInstructor(userId);
 
@@ -46,7 +49,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     };
   });
 
-  return { courses: coursesWithStats, needsAttention: dashboard.needsAttention };
+  return { courses: coursesWithStats, dashboard };
 }
 
 function statusBadge(status: string) {
@@ -111,7 +114,7 @@ export function HydrateFallback() {
 export default function InstructorDashboard({
   loaderData,
 }: Route.ComponentProps) {
-  const { courses, needsAttention } = loaderData;
+  const { courses, dashboard } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -124,7 +127,10 @@ export default function InstructorDashboard({
         <span className="text-foreground">My Courses</span>
       </nav>
 
-      <NeedsAttention rows={needsAttention} />
+      <NeedsAttention rows={dashboard.needsAttention} />
+      <CourseCards cards={dashboard.courseCards} />
+      <UnansweredQuestions questions={dashboard.unansweredQuestions} />
+      <RecentDiscussion entries={dashboard.recentDiscussion} />
 
       <div className="mb-8 flex items-center justify-between">
         <div>

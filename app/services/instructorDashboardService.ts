@@ -1,4 +1,13 @@
-import { eq, inArray } from "drizzle-orm";
+import {
+  and,
+  count,
+  desc,
+  eq,
+  inArray,
+  isNull,
+  ne,
+  notInArray,
+} from "drizzle-orm";
 import { db } from "~/db";
 import {
   comments,
@@ -14,15 +23,16 @@ import {
   videoWatchEvents,
 } from "~/db/schema";
 import { daysExcludingSundays } from "~/lib/days";
-import { STALE_QUESTION_AFTER_DAYS } from "~/lib/comments";
+import { isStaleQuestion } from "~/lib/comments";
 import {
   getUnansweredQuestions,
   type QueuedQuestion,
 } from "~/services/commentService";
 
 // ─── Instructor Dashboard Service ───
-// Everything the instructor dashboard knows about who needs help. Routes only
-// check access and render; every rule lives here. `now` is a parameter so the
+// Everything the instructor dashboard shows: who needs help, how each course is
+// doing, unanswered questions and recent discussion. Routes only check access
+// and render; every rule lives here. `now` is a parameter so the
 // time-based rules can be tested against a fixed date.
 //
 // Day counts use ~/lib/days: calendar days in the server's time zone, Sundays
@@ -35,6 +45,15 @@ export const QUIZ_RETRY_THRESHOLD = 2;
 
 /** Days without activity before a student is "quiet". */
 export const QUIET_AFTER_DAYS = 3;
+
+/** Students who must share a drop-off lesson before a card shows it. */
+export const DROP_OFF_MIN_STUDENTS = 3;
+
+/** Unanswered questions listed on the dashboard; the rest are one click away. */
+export const UNANSWERED_QUESTIONS_SHOWN = 10;
+
+/** Threads in the recent discussion feed. */
+export const RECENT_DISCUSSION_SHOWN = 10;
 
 export type AttentionFlag =
   | {
@@ -59,18 +78,57 @@ export type NeedsAttentionRow = {
   flags: AttentionFlag[];
 };
 
-export type InstructorDashboard = {
-  needsAttention: NeedsAttentionRow[];
+export type CourseCard = {
+  course: { id: number; title: string; slug: string };
+  enrolledCount: number;
+  /** Distinct students with at least one flag in this course. */
+  stuckCount: number;
+  unansweredCount: number;
+  finishedCount: number;
+  /** Where unfinished students most often stopped; null below the minimum. */
+  dropOffLesson: { id: number; title: string; studentCount: number } | null;
 };
 
-/**
- * Pass null for instructorId to span every course (admins); pass an id to
- * scope to the courses that instructor owns.
- */
+export type UnansweredQuestion = {
+  id: number;
+  student: { id: number; name: string; avatarUrl: string | null };
+  course: { id: number; title: string; slug: string };
+  lesson: { id: number; title: string };
+  /** First line of the question. */
+  excerpt: string;
+  createdAt: string;
+  waitingDays: number;
+  isStale: boolean;
+};
+
+export type DiscussionEntry = {
+  id: number;
+  author: { id: number; name: string; avatarUrl: string | null };
+  course: { id: number; title: string; slug: string };
+  lesson: { id: number; title: string };
+  excerpt: string;
+  createdAt: string;
+  /** Replies that haven't been deleted. */
+  replyCount: number;
+};
+
+export type InstructorDashboard = {
+  needsAttention: NeedsAttentionRow[];
+  courseCards: CourseCard[];
+  /** Oldest first. */
+  unansweredQuestions: UnansweredQuestion[];
+  /** Newest first. */
+  recentDiscussion: DiscussionEntry[];
+};
+
+/** The signed-in user. Admins span every course; instructors their own. */
+export type Viewer = { userId: number; isAdmin: boolean };
+
 export function getInstructorDashboard(
-  instructorId: number | null,
+  viewer: Viewer,
   now: Date
 ): InstructorDashboard {
+  const instructorId = viewer.isAdmin ? null : viewer.userId;
   const scopedCourses = db
     .select({ id: courses.id, title: courses.title, slug: courses.slug })
     .from(courses)
@@ -79,7 +137,14 @@ export function getInstructorDashboard(
     )
     .all();
 
-  if (scopedCourses.length === 0) return { needsAttention: [] };
+  if (scopedCourses.length === 0) {
+    return {
+      needsAttention: [],
+      courseCards: [],
+      unansweredQuestions: [],
+      recentDiscussion: [],
+    };
+  }
 
   const facts = loadCourseFacts(
     scopedCourses.map((c) => c.id),
@@ -116,7 +181,139 @@ export function getInstructorDashboard(
       a.student.name.localeCompare(b.student.name)
   );
 
-  return { needsAttention };
+  return {
+    needsAttention,
+    courseCards: buildCourseCards(scopedCourses, facts, needsAttention),
+    unansweredQuestions: facts.unansweredOldestFirst
+      .slice(0, UNANSWERED_QUESTIONS_SHOWN)
+      .map((q) => {
+        const waitingDays = daysExcludingSundays(q.createdAt, now);
+        return {
+          id: q.id,
+          student: { id: q.authorId, name: q.authorName, avatarUrl: q.authorAvatarUrl },
+          course: courseById.get(facts.lessonCourse.get(q.lessonId)!)!,
+          lesson: { id: q.lessonId, title: q.lessonTitle },
+          excerpt: firstLine(q.body),
+          createdAt: q.createdAt,
+          waitingDays,
+          isStale: isStaleQuestion(waitingDays),
+        };
+      }),
+    recentDiscussion: buildRecentDiscussion(viewer, facts, courseById),
+  };
+}
+
+// ─── Recent discussion ───
+
+/**
+ * Newest live top-level comments in the viewer's courses. Unanswered questions
+ * have their own section, and the viewer's own comments aren't news to them.
+ */
+function buildRecentDiscussion(
+  viewer: Viewer,
+  facts: CourseFacts,
+  courseById: Map<number, CourseCard["course"]>
+): DiscussionEntry[] {
+  const lessonIds = [...facts.lessonCourse.keys()];
+  if (lessonIds.length === 0) return [];
+
+  const unansweredIds = facts.unansweredOldestFirst.map((q) => q.id);
+
+  const threads = db
+    .select({
+      id: comments.id,
+      body: comments.body,
+      createdAt: comments.createdAt,
+      authorId: users.id,
+      authorName: users.name,
+      authorAvatarUrl: users.avatarUrl,
+      lessonId: lessons.id,
+      lessonTitle: lessons.title,
+    })
+    .from(comments)
+    .innerJoin(users, eq(users.id, comments.userId))
+    .innerJoin(lessons, eq(lessons.id, comments.lessonId))
+    .where(
+      and(
+        inArray(comments.lessonId, lessonIds),
+        isNull(comments.parentId),
+        isNull(comments.deletedAt),
+        ne(comments.userId, viewer.userId),
+        unansweredIds.length > 0
+          ? notInArray(comments.id, unansweredIds)
+          : undefined
+      )
+    )
+    .orderBy(desc(comments.createdAt), desc(comments.id))
+    .limit(RECENT_DISCUSSION_SHOWN)
+    .all();
+
+  if (threads.length === 0) return [];
+
+  const replyCounts = new Map(
+    db
+      .select({ parentId: comments.parentId, replies: count() })
+      .from(comments)
+      .where(
+        and(
+          inArray(
+            comments.parentId,
+            threads.map((t) => t.id)
+          ),
+          isNull(comments.deletedAt)
+        )
+      )
+      .groupBy(comments.parentId)
+      .all()
+      .map((row) => [row.parentId, row.replies])
+  );
+
+  return threads.map((t) => ({
+    id: t.id,
+    author: { id: t.authorId, name: t.authorName, avatarUrl: t.authorAvatarUrl },
+    course: courseById.get(facts.lessonCourse.get(t.lessonId)!)!,
+    lesson: { id: t.lessonId, title: t.lessonTitle },
+    excerpt: firstLine(t.body),
+    createdAt: t.createdAt,
+    replyCount: replyCounts.get(t.id) ?? 0,
+  }));
+}
+
+// ─── Course cards ───
+
+function buildCourseCards(
+  scopedCourses: CourseCard["course"][],
+  facts: CourseFacts,
+  needsAttention: NeedsAttentionRow[]
+): CourseCard[] {
+  const cards: CourseCard[] = [];
+
+  for (const course of scopedCourses) {
+    const students = facts.enrolled.filter((e) => e.courseId === course.id);
+    if (students.length === 0) continue;
+
+    cards.push({
+      course,
+      enrolledCount: students.length,
+      // One row per student per course, so rows are already distinct students.
+      stuckCount: needsAttention.filter((row) => row.course.id === course.id)
+        .length,
+      unansweredCount: facts.unansweredOldestFirst.filter(
+        (q) => facts.lessonCourse.get(q.lessonId) === course.id
+      ).length,
+      finishedCount: students.filter((s) =>
+        hasFinished(facts, s.userId, course.id)
+      ).length,
+      dropOffLesson: dropOffLesson(facts, course.id, students),
+    });
+  }
+
+  return cards.sort(
+    (a, b) =>
+      b.stuckCount - a.stuckCount ||
+      b.unansweredCount - a.unansweredCount ||
+      a.course.title.localeCompare(b.course.title)
+  );
 }
 
 // ─── Flag rules ───
@@ -189,7 +386,7 @@ function waitingFlag(
 
   const oldest = waiting[0];
   const days = daysExcludingSundays(oldest.createdAt, now);
-  return days >= STALE_QUESTION_AFTER_DAYS
+  return isStaleQuestion(days)
     ? [
         {
           kind: "waiting",
@@ -212,6 +409,39 @@ function longestStuck(row: NeedsAttentionRow): number {
 function firstLine(body: string): string {
   const line = body.trim().split("\n")[0].trim();
   return line.length > 120 ? `${line.slice(0, 119)}…` : line;
+}
+
+/**
+ * For each unfinished student, the first lesson in course order they haven't
+ * completed; the most common one, if enough students share it.
+ */
+function dropOffLesson(
+  facts: CourseFacts,
+  courseId: number,
+  students: Enrolled[]
+): CourseCard["dropOffLesson"] {
+  const courseLessons = facts.orderedLessons.filter(
+    (l) => l.courseId === courseId
+  );
+  const stalledAt = new Map<number, number>();
+
+  for (const student of students) {
+    const next = courseLessons.find(
+      (l) => !facts.completedLessons.has(key(student.userId, l.id))
+    );
+    if (next) stalledAt.set(next.id, (stalledAt.get(next.id) ?? 0) + 1);
+  }
+
+  // Ties go to the earlier lesson: Map keeps insertion order, and students
+  // only ever reach later lessons by passing earlier ones.
+  let best: CourseCard["dropOffLesson"] = null;
+  for (const lesson of courseLessons) {
+    const count = stalledAt.get(lesson.id) ?? 0;
+    if (count >= DROP_OFF_MIN_STUDENTS && count > (best?.studentCount ?? 0)) {
+      best = { id: lesson.id, title: lesson.title, studentCount: count };
+    }
+  }
+  return best;
 }
 
 // ─── Loading ───
@@ -254,15 +484,16 @@ function loadCourseFacts(courseIds: number[], instructorId: number | null) {
     ).values(),
   ];
 
-  const lessonCourse = new Map(
-    db
-      .select({ lessonId: lessons.id, courseId: modules.courseId })
-      .from(lessons)
-      .innerJoin(modules, eq(modules.id, lessons.moduleId))
-      .where(inArray(modules.courseId, courseIds))
-      .all()
-      .map((row) => [row.lessonId, row.courseId])
-  );
+  // Course order: module position, then lesson position.
+  const orderedLessons = db
+    .select({ id: lessons.id, title: lessons.title, courseId: modules.courseId })
+    .from(lessons)
+    .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .where(inArray(modules.courseId, courseIds))
+    .orderBy(modules.position, lessons.position, lessons.id)
+    .all();
+
+  const lessonCourse = new Map(orderedLessons.map((l) => [l.id, l.courseId]));
 
   const lessonCountByCourse = new Map<number, number>();
   for (const courseId of lessonCourse.values()) {
@@ -288,6 +519,7 @@ function loadCourseFacts(courseIds: number[], instructorId: number | null) {
   const progress = db
     .select({
       userId: lessonProgress.userId,
+      lessonId: lessonProgress.lessonId,
       status: lessonProgress.status,
       lastViewedAt: lessonProgress.lastViewedAt,
       completedAt: lessonProgress.completedAt,
@@ -299,11 +531,19 @@ function loadCourseFacts(courseIds: number[], instructorId: number | null) {
     .where(inArray(modules.courseId, courseIds))
     .all();
 
-  const completedCount = new Map<string, number>();
+  // Keyed by user and lesson; a Set so duplicate progress rows count once.
+  const completedLessons = new Set<string>();
   for (const row of progress) {
-    if (row.status !== LessonProgressStatus.Completed) continue;
-    const k = key(row.userId, row.courseId);
-    completedCount.set(k, (completedCount.get(k) ?? 0) + 1);
+    if (row.status === LessonProgressStatus.Completed) {
+      completedLessons.add(key(row.userId, row.lessonId));
+    }
+  }
+
+  const completedCount = new Map<string, number>();
+  for (const userLesson of completedLessons) {
+    const [userId, lessonId] = userLesson.split(":").map(Number);
+    const userCourse = key(userId, lessonCourse.get(lessonId)!);
+    completedCount.set(userCourse, (completedCount.get(userCourse) ?? 0) + 1);
   }
 
   const lastActivity = loadLastActivity(courseIds, attempts, progress);
@@ -314,7 +554,9 @@ function loadCourseFacts(courseIds: number[], instructorId: number | null) {
 
   return {
     enrolled,
+    orderedLessons,
     lessonCourse,
+    completedLessons,
     lessonCountByCourse,
     completedCount,
     attempts,

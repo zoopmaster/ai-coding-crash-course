@@ -9,3 +9,8 @@ export const MAX_COMMENT_LENGTH = 5000;
 // staff reply is stale: highlighted on the questions page and flagged on the
 // instructor dashboard.
 export const STALE_QUESTION_AFTER_DAYS = 3;
+
+/** `waitingDays` from daysExcludingSundays. One rule for every page. */
+export function isStaleQuestion(waitingDays: number): boolean {
+  return waitingDays >= STALE_QUESTION_AFTER_DAYS;
+}

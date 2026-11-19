@@ -21,10 +21,7 @@ import { Textarea } from "~/components/ui/textarea";
 import { UserAvatar } from "~/components/user-avatar";
 import { AlertTriangle, CheckCircle2, ExternalLink } from "lucide-react";
 import { cn, formatRelativeTime } from "~/lib/utils";
-import {
-  MAX_COMMENT_LENGTH,
-  STALE_QUESTION_AFTER_DAYS,
-} from "~/lib/comments";
+import { MAX_COMMENT_LENGTH, isStaleQuestion } from "~/lib/comments";
 import { daysExcludingSundays } from "~/lib/days";
 import { parseFormData } from "~/lib/validation";
 
@@ -110,7 +107,7 @@ function QuestionCard({ question }: { question: Question }) {
   const fetcher = useFetcher<{ ok?: boolean; error?: string }>();
   const [body, setBody] = useState("");
   const { waitingDays } = question;
-  const stale = waitingDays >= STALE_QUESTION_AFTER_DAYS;
+  const stale = isStaleQuestion(waitingDays);
   const submitting = fetcher.state !== "idle";
 
   useEffect(() => {
