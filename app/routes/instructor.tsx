@@ -2,15 +2,16 @@ import { Link } from "react-router";
 import type { Route } from "./+types/instructor";
 import { getCoursesByInstructor, getLessonCountForCourse } from "~/services/courseService";
 import { getEnrollmentCountForCourse } from "~/services/enrollmentService";
-import { getCurrentUserId } from "~/lib/session";
-import { getUserById } from "~/services/userService";
+import { requireInstructorOrAdmin } from "~/lib/access.server";
+import { getInstructorDashboard } from "~/services/instructorDashboardService";
+import { NeedsAttention } from "~/components/needs-attention";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
 import { AlertTriangle, BookOpen, GraduationCap, Plus, Users } from "lucide-react";
 import { CourseImage } from "~/components/course-image";
-import { data, isRouteErrorResponse } from "react-router";
-import { CourseStatus, UserRole } from "~/db/schema";
+import { isRouteErrorResponse } from "react-router";
+import { CourseStatus } from "~/db/schema";
 
 export function meta() {
   return [
@@ -20,23 +21,12 @@ export function meta() {
 }
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const currentUserId = await getCurrentUserId(request);
+  const { userId, isAdmin } = await requireInstructorOrAdmin(request);
 
-  if (!currentUserId) {
-    throw data("Select a user from the DevUI panel to view your courses.", {
-      status: 401,
-    });
-  }
+  // Admins see every course here; instructors only their own.
+  const dashboard = getInstructorDashboard(isAdmin ? null : userId, new Date());
 
-  const user = getUserById(currentUserId);
-
-  if (!user || user.role !== UserRole.Instructor) {
-    throw data("Only instructors can access this page.", {
-      status: 403,
-    });
-  }
-
-  const instructorCourses = getCoursesByInstructor(currentUserId);
+  const instructorCourses = getCoursesByInstructor(userId);
 
   const coursesWithStats = instructorCourses.map((course) => {
     const lessonCount = getLessonCountForCourse(course.id);
@@ -56,7 +46,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     };
   });
 
-  return { courses: coursesWithStats };
+  return { courses: coursesWithStats, needsAttention: dashboard.needsAttention };
 }
 
 function statusBadge(status: string) {
@@ -121,7 +111,7 @@ export function HydrateFallback() {
 export default function InstructorDashboard({
   loaderData,
 }: Route.ComponentProps) {
-  const { courses } = loaderData;
+  const { courses, needsAttention } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -133,6 +123,8 @@ export default function InstructorDashboard({
         <span className="mx-2">/</span>
         <span className="text-foreground">My Courses</span>
       </nav>
+
+      <NeedsAttention rows={needsAttention} />
 
       <div className="mb-8 flex items-center justify-between">
         <div>

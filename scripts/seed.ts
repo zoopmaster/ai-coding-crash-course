@@ -1603,16 +1603,22 @@ You've completed the Building REST APIs course. You now have the skills to build
         lessonId,
         status: LessonProgressStatus.Completed,
         completedAt: daysAgo(daysAgoCompleted),
+        lastViewedAt: daysAgo(daysAgoCompleted),
       })
       .run();
   }
 
-  function markInProgress(userId: number, lessonId: number) {
+  function markInProgress(
+    userId: number,
+    lessonId: number,
+    daysAgoViewed: number
+  ) {
     db.insert(schema.lessonProgress)
       .values({
         userId,
         lessonId,
         status: LessonProgressStatus.InProgress,
+        lastViewedAt: daysAgo(daysAgoViewed),
       })
       .run();
   }
@@ -1621,13 +1627,13 @@ You've completed the Building REST APIs course. You now have the skills to build
   for (let i = 0; i < 17; i++) {
     markComplete(students[0].id, course1LessonIds[i], 50 - i);
   }
-  markInProgress(students[0].id, course1LessonIds[17]);
+  markInProgress(students[0].id, course1LessonIds[17], 1);
 
   // Emma — mid-way through course 2 (10 of 20 lessons done)
   for (let i = 0; i < 10; i++) {
     markComplete(students[0].id, course2LessonIds[i], 40 - i);
   }
-  markInProgress(students[0].id, course2LessonIds[10]);
+  markInProgress(students[0].id, course2LessonIds[10], 6);
 
   // James (students[1]) — completed all of course 1
   for (let i = 0; i < course1LessonIds.length; i++) {
@@ -1638,7 +1644,7 @@ You've completed the Building REST APIs course. You now have the skills to build
   for (let i = 0; i < 3; i++) {
     markComplete(students[2].id, course1LessonIds[i], 30 - i);
   }
-  markInProgress(students[2].id, course1LessonIds[3]);
+  markInProgress(students[2].id, course1LessonIds[3], 0);
 
   // Olivia — mid-way through course 2 (8 lessons done)
   for (let i = 0; i < 8; i++) {
@@ -1652,7 +1658,7 @@ You've completed the Building REST APIs course. You now have the skills to build
 
   // Sophia (students[4]) — barely started course 1 (1 lesson done)
   markComplete(students[4].id, course1LessonIds[0], 12);
-  markInProgress(students[4].id, course1LessonIds[1]);
+  markInProgress(students[4].id, course1LessonIds[1], 9);
 
   console.log("Created lesson progress records.");
 

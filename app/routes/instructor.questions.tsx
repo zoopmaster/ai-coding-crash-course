@@ -20,8 +20,12 @@ import { Skeleton } from "~/components/ui/skeleton";
 import { Textarea } from "~/components/ui/textarea";
 import { UserAvatar } from "~/components/user-avatar";
 import { AlertTriangle, CheckCircle2, ExternalLink } from "lucide-react";
-import { cn, daysSince, formatRelativeTime } from "~/lib/utils";
-import { MAX_COMMENT_LENGTH } from "~/lib/comments";
+import { cn, formatRelativeTime } from "~/lib/utils";
+import {
+  MAX_COMMENT_LENGTH,
+  STALE_QUESTION_AFTER_DAYS,
+} from "~/lib/comments";
+import { daysExcludingSundays } from "~/lib/days";
 import { parseFormData } from "~/lib/validation";
 
 // ─── Unanswered Questions Queue ───
@@ -31,9 +35,6 @@ import { parseFormData } from "~/lib/validation";
 // ever answered.
 //
 // "Unanswered" is derived, not stored: see commentService.getUnansweredQuestions.
-
-// A question sitting this long without an answer gets called out visually.
-const STALE_AFTER_DAYS = 3;
 
 const replySchema = z.object({
   intent: z.literal("reply"),
@@ -51,10 +52,13 @@ export async function loader({ request }: Route.LoaderArgs) {
   // Admins span every course; instructors see only the courses they own.
   const questions = getUnansweredQuestions(isAdmin ? null : userId);
 
+  // Counted on the server so the Sunday rule uses the server's calendar.
+  const now = new Date();
   const rendered = await Promise.all(
     questions.map(async (question) => ({
       ...question,
       bodyHtml: await renderComment(question.body),
+      waitingDays: daysExcludingSundays(question.createdAt, now),
     }))
   );
 
@@ -105,8 +109,8 @@ type Question = Awaited<ReturnType<typeof loader>>["questions"][number];
 function QuestionCard({ question }: { question: Question }) {
   const fetcher = useFetcher<{ ok?: boolean; error?: string }>();
   const [body, setBody] = useState("");
-  const waitingDays = daysSince(question.createdAt);
-  const stale = waitingDays >= STALE_AFTER_DAYS;
+  const { waitingDays } = question;
+  const stale = waitingDays >= STALE_QUESTION_AFTER_DAYS;
   const submitting = fetcher.state !== "idle";
 
   useEffect(() => {
@@ -144,7 +148,6 @@ function QuestionCard({ question }: { question: Question }) {
                 ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300"
                 : "bg-muted text-muted-foreground"
             )}
-            suppressHydrationWarning
           >
             {waitingDays === 0
               ? "Waiting today"
@@ -225,7 +228,7 @@ export default function InstructorQuestions({
   return (
     <div className="mx-auto max-w-4xl p-6 lg:p-8">
       <nav className="mb-6 text-sm text-muted-foreground">
-        {/* /instructor is instructor-only, so admins go back to their own list. */}
+        {/* Admins manage courses from the admin list rather than My Courses. */}
         <Link
           to={isAdmin ? "/admin/courses" : "/instructor"}
           className="hover:text-foreground"

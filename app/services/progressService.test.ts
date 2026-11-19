@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 
@@ -129,6 +129,48 @@ describe("progressService", () => {
 
       expect(second.status).toBe(schema.LessonProgressStatus.InProgress);
       expect(second.id).toBe(first.id);
+    });
+
+    describe("last viewed time", () => {
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it("records when the lesson was first viewed", () => {
+        const { lessons } = createModuleWithLessons(base.course.id, "Module 1", 1, 1);
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date("2026-11-16T10:00:00.000Z"));
+
+        const progress = markLessonInProgress(base.user.id, lessons[0].id);
+
+        expect(progress.lastViewedAt).toBe("2026-11-16T10:00:00.000Z");
+      });
+
+      it("moves forward on every later view", () => {
+        const { lessons } = createModuleWithLessons(base.course.id, "Module 1", 1, 1);
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date("2026-11-16T10:00:00.000Z"));
+        markLessonInProgress(base.user.id, lessons[0].id);
+
+        vi.setSystemTime(new Date("2026-11-18T09:30:00.000Z"));
+        const progress = markLessonInProgress(base.user.id, lessons[0].id);
+
+        expect(progress.lastViewedAt).toBe("2026-11-18T09:30:00.000Z");
+      });
+
+      it("updates on views of a completed lesson without downgrading it", () => {
+        const { lessons } = createModuleWithLessons(base.course.id, "Module 1", 1, 1);
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date("2026-11-16T10:00:00.000Z"));
+        markLessonComplete(base.user.id, lessons[0].id);
+
+        vi.setSystemTime(new Date("2026-11-19T08:00:00.000Z"));
+        const progress = markLessonInProgress(base.user.id, lessons[0].id);
+
+        expect(progress.status).toBe(schema.LessonProgressStatus.Completed);
+        expect(progress.completedAt).toBe("2026-11-16T10:00:00.000Z");
+        expect(progress.lastViewedAt).toBe("2026-11-19T08:00:00.000Z");
+      });
     });
   });
 

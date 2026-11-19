@@ -1,0 +1,1 @@
+ALTER TABLE `lesson_progress` ADD `last_viewed_at` text;

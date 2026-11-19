@@ -85,13 +85,17 @@ export function markLessonComplete(userId: number, lessonId: number) {
 export function markLessonInProgress(userId: number, lessonId: number) {
   const existing = getLessonProgress(userId, lessonId);
 
+  const lastViewedAt = new Date().toISOString();
+
   if (existing) {
-    if (existing.status === LessonProgressStatus.Completed) {
-      return existing;
-    }
+    // A completed lesson stays completed; only the view time moves forward.
+    const status =
+      existing.status === LessonProgressStatus.Completed
+        ? LessonProgressStatus.Completed
+        : LessonProgressStatus.InProgress;
     return db
       .update(lessonProgress)
-      .set({ status: LessonProgressStatus.InProgress })
+      .set({ status, lastViewedAt })
       .where(eq(lessonProgress.id, existing.id))
       .returning()
       .get();
@@ -103,6 +107,7 @@ export function markLessonInProgress(userId: number, lessonId: number) {
       userId,
       lessonId,
       status: LessonProgressStatus.InProgress,
+      lastViewedAt,
     })
     .returning()
     .get();

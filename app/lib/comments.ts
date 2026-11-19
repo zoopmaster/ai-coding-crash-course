@@ -4,3 +4,8 @@
 
 export const MIN_COMMENT_LENGTH = 1;
 export const MAX_COMMENT_LENGTH = 5000;
+
+// A question waiting this many days (Sundays excluded — see ~/lib/days) for a
+// staff reply is stale: highlighted on the questions page and flagged on the
+// instructor dashboard.
+export const STALE_QUESTION_AFTER_DAYS = 3;

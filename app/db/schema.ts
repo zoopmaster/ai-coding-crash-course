@@ -136,6 +136,9 @@ export const lessonProgress = sqliteTable("lesson_progress", {
     .references(() => lessons.id),
   status: text("status").notNull().$type<LessonProgressStatus>(),
   completedAt: text("completed_at"),
+  // Set on every view of the lesson, including views of completed lessons.
+  // Feeds "last activity" on the instructor dashboard.
+  lastViewedAt: text("last_viewed_at"),
 });
 
 export const quizzes = sqliteTable("quizzes", {
